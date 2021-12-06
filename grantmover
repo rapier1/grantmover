@@ -1,0 +1,91 @@
+#!/usr/bin/perl
+# The goal of this is to provide an easy way to quickly move
+# users from one granty allocation to another. In this initial
+# form we are taking the most basic task of transferring a user's files
+# from an existing allocation, moving them to a new one, updating the
+# group id on all of the files and then setting the ownership of
+# any files in the ./shared directory to that of the PI.
+
+# This is essentially a wrapper around parsyncfp and
+# gun parallel. As such, both have to be installed and available.
+
+# this script is intended to be run by an admin as root.
+
+# input values are the source directory, the target directory,
+# the group id, and the user id of the PI.
+
+use strict;
+
+my $pid = getppid();
+my $parsync = "/opt/projects/parsync/parsyncfp";
+my $parallel = "/usr/bin/parallel";
+
+print "\n";
+
+# ensure the tools we need exist
+if (! -e $parsync) {
+    print "Parsyncfp was not found at $parsync. Exiting.\n\n";
+    exit;
+}
+
+if (! -e $parallel) {
+    print "GNU parallel was not found at $parallel. Exiting.\n\n";
+    exit;
+}
+
+#get information about the user
+USERDATA:
+print "Userid of allocation? ";
+my $userid = <STDIN>;
+chomp $userid;
+print "Groupid of new allocation? ";
+my $groupid = <STDIN>;
+chomp $groupid;
+print "Path to source directory? ";
+my $source = <STDIN>;
+chomp $source;
+print "Path to target directory? ";
+my $target = <STDIN>;
+chomp $target;
+
+print "\nWe will be moving data from $source to $target for $userid\n";
+print "Is that correct? <Y/n> ";
+my $confirm = <STDIN>;
+
+if ($confirm =~ m/^y/i) {
+    print "Excellent!\n";
+} else {
+    goto USERDATA;
+}
+
+#set up the commands we'll be running
+my $fpcommand = "$parsync
+-NP=12
+--user=grantmover 
+--spinneroff 
+--altcache=/ocean/projects/pscstaff/parsync/parsync_caches/grantmover.psync.cache/$pid
+--utilpath=/opt/packages/parsync 
+-maxload=120 
+-chunksize=-2G 
+--nowait 
+--startdir=$source 
+. 
+$target";
+
+my $gidcommand = "find $target -depth -type d | parallel --progress --jobs 12 -a - chgrp $groupid {} {}/* ()/.*;";
+my $gidsymlinkcommand = "find $target -depth -type I | parallel --progress --jobs 12 -a - chgrp $groupid {};";
+
+my $uidcommand = "find $target/shared -depth -type d | parallel --progress --jobs 12 -a - chown $userid {} {}/* ()/.*;";
+my $uidsymlinkcommand = "find $target/shared -depth -type I | parallel --progress --jobs 12 -a - chown $userid {};";
+
+print "\nRunning parsyncfp with the following command:\n $fpcommand\n";
+system ($fpcommand);
+print "\nChanging group ownership with:\n $gidcommand\n";
+system ($gidcommand);
+print "\nUpdating group ownership of symlinks with: $gidsymlinkcommand\n";
+system ($gidsymlinkcommand);
+print "\nChanging user ownership of shared directory with:\n $gidcommand\n";
+system ($gidcommand);
+print "\nUpdating user ownership of symlinks in shared directory with: $gidsymlinkcommand\n";
+system ($gidsymlinkcommand);
+print "\nOperation complete\n\n";
