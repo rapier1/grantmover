@@ -15,11 +15,14 @@
 # the group id, and the user id of the PI.
 
 use strict;
+use warnings;
+use Capture::Tiny qw(:all); #get the results of system commands
 
-my $pid = getppid();
+my $pid = $$; #get the current pid of the script
 my $parsync = "/opt/packages/parsync/parsyncfp";
 my $parallel = "/usr/bin/parallel";
 
+# just to make the interface look pretty
 print "\n";
 
 # ensure the tools we need exist
@@ -38,15 +41,50 @@ USERDATA:
 print "Userid of allocation? ";
 my $userid = <STDIN>;
 chomp $userid;
+(my $uid, my $err, my $exit) = capture {
+    system("getent passwd | grep -w $userid | cut -d ':' -f1");
+};
+chomp $uid; # the result of the capture has an appended newline
+if ($uid ne $userid) {
+    print "The user $userid does not exist. Please confirm the username\n";
+    print "and try again.\n";
+    goto USERDATA;
+}
+
 print "Groupid of new allocation? ";
 my $groupid = <STDIN>;
-chomp $groupid;
+chomp $groupid; 
+(my $gid, $err, $exit) = capture {
+    system("getent group | grep -w $groupid | cut -d ':' -f1");
+};
+chomp $gid; # the result of the capture has an appended newline
+if ($gid ne $groupid) {
+    print "The group $groupid does not exist. Please confirm the group\n";
+    print "and try again.\n";
+    goto USERDATA;
+}
+
 print "Path to source directory? ";
 my $source = <STDIN>;
 chomp $source;
+if (! -e $source) {
+    print "\nSource directory $source does not exist. Please confirm\n";
+    print "the source directory and try again\n";
+    exit;
+}
+
 print "Path to target directory? ";
 my $target = <STDIN>;
 chomp $target;
+if (! -e $target) {
+    print "\nThe target directory $target does not exist.\n";
+    print "Please make sure $target is a valid directory\n";
+    print "and try again.\n";
+    exit;
+}
+
+# we move the old allocation data into a subdirectory of the new allocation
+$target .= "/old_allocation_data";
 
 print "\nWe will be moving data from $source to $target for $userid\n";
 print "Is that correct? <Y/n> ";
@@ -58,12 +96,25 @@ if ($confirm =~ m/^y/i) {
     goto USERDATA;
 }
 
+# figure out the path to the altcache and create the
+# necessary subdirectories
+my $altcache = "/ocean/projects/pscstaff/parsync/parsync_caches/grantmover.psync.cache/$userid/$pid";
+
+(my $junk, $err, $exit) = capture {
+    system("mkdir -p $altcache");
+};
+
+if ($err) {
+    print "Could not create cache directory for parsync. Exiting.\n$err.\n";
+    exit;
+}
+
 #set up the commands we'll be running
 my $fpcommand = "$parsync \\
 -NP=12 \\
 --user=grantmover \\
 --spinneroff \\
---altcache=/ocean/projects/pscstaff/parsync/parsync_caches/grantmover.psync.cache/$pid \\
+--altcache=$altcache \\
 --utilpath=/opt/packages/parsync \\
 -maxload=120 \\
 -chunksize=-2G \\
@@ -72,20 +123,25 @@ my $fpcommand = "$parsync \\
 . \\
 $target";
 
-my $gidcommand = "find $target -depth -type d | parallel --progress --jobs 12 -a - chgrp $groupid {} {}/* {}/.*;";
-my $gidsymlinkcommand = "find $target -depth -type l | parallel --progress --jobs 12 -a - chgrp $groupid {};";
+my $gidcommand = "find $target -depth -type d | parallel --jobs 12 -a - chgrp $groupid {} {}/* {}/.*";
+my $gidsymlinkcommand = "find $target -depth -type l | parallel --jobs 12 -a - chgrp $groupid {}";
 
-my $uidcommand = "find $target/shared -depth -type d | parallel --progress --jobs 12 -a - chown $userid {} {}/* {}/.*;";
-my $uidsymlinkcommand = "find $target/shared -depth -type l | parallel --progress --jobs 12 -a - chown $userid {};";
+my $uidcommand = "find $target/shared -depth -type d | parallel --jobs 12 -a - chown $userid {} {}/* {}/.*";
+my $uidsymlinkcommand = "find $target/shared -depth -type l | parallel --jobs 12 -a - chown $userid {}";
+my $changeownership = "chown $uid $target";
 
+#run the commands. All output from the
+#commands are tee'd into a log file found in the altcache location
 print "\nRunning parsyncfp with the following command:\n $fpcommand\n";
-system ($fpcommand);
+system ("$fpcommand |& tee -a $altcache/parsync.log");
+print "\nChanging ownership of ./old_allocation_data\n";
+system ("$changeownership |& tee -a $altcache/chown_old_allocataion_data.log");
 print "\nChanging group ownership with:\n $gidcommand\n";
-system ($gidcommand);
+system ("$gidcommand |& tee -a $altcache/chgrp.log");
 print "\nUpdating group ownership of symlinks with: $gidsymlinkcommand\n";
-system ($gidsymlinkcommand);
+system ("$gidsymlinkcommand |& tee -a $altcache/chgrp-symlink.log");
 print "\nChanging user ownership of shared directory with:\n $uidcommand\n";
-system ($uidcommand);
+system ("$uidcommand |& tee -a $altcache/chown_shared.log");
 print "\nUpdating user ownership of symlinks in shared directory with: $uidsymlinkcommand\n";
-system ($uidsymlinkcommand);
+system ("$uidsymlinkcommand |& tee -a $altcache/chown_shared_symlink.log");
 print "\nOperation complete\n\n";
